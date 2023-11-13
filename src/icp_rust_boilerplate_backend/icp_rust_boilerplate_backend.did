@@ -1,3 +1,22 @@
+type Error = variant {
+  NotFound : record { msg : text };
+  Unauthorized : record { msg : text };
+};
+type Result = variant { Ok : Tweet; Err : Error };
+type Tweet = record {
+  id : nat64;
+  content : text;
+  username : text;
+  created_at : nat64;
+  likes : nat64;
+  comments : vec text;
+};
+type TweetPayload = record { content : text };
 service : {
-    "greet": (text) -> (text) query;
+  create_tweet : (TweetPayload) -> (opt Tweet);
+  delete_tweet : (nat64) -> (Result);
+  get_all_usernames : () -> (vec text) query;
+  get_tweet : (nat64) -> (Result) query;
+  set_username : (text) -> (opt null);
+  update_tweet : (nat64, TweetPayload) -> (Result);
 }
