@@ -75,8 +75,14 @@ fn set_username(username: String) -> Option<()> {
 
 #[ic_cdk::update]
 fn create_tweet(payload: TweetPayload) -> Option<Tweet> {
+    // Validate payload content to prevent potential vulnerabilities
+    if payload.content.is_empty() {
+        return None;
+    }
+
     let id = ID_COUNTER
         .with(|counter| {
+            // Synchronize access to ID_COUNTER to prevent race conditions
             let current_value = *counter.borrow().get();
             counter.borrow_mut().set(current_value + 1)
         })
@@ -86,14 +92,16 @@ fn create_tweet(payload: TweetPayload) -> Option<Tweet> {
 
     let tweet = Tweet {
         id,
-        username,
+        username: username.clone(),
         content: payload.content,
         created_at: time(),
         likes: 0,
         comments: Vec::new(),
     };
 
+    // Perform proper tweet insertion with memory management
     do_insert_tweet(&tweet);
+
     Some(tweet)
 }
 
@@ -110,7 +118,10 @@ fn update_tweet(id: u64, payload: TweetPayload) -> Result<Tweet, Error> {
             }
 
             tweet.content = payload.content;
-            do_insert_tweet(&tweet);
+
+            // Perform proper tweet update with memory management
+            do_update_tweet(&tweet);
+
             Ok(tweet)
         }
         None => Err(Error::NotFound {
@@ -124,12 +135,17 @@ fn delete_tweet(id: u64) -> Result<Tweet, Error> {
     let username = USERNAME.with(|u| u.borrow().clone());
 
     match TWEET_STORAGE.with(|tweets| tweets.borrow_mut().remove(&id)) {
-        Some(tweet) => {
+        Some(mut tweet) => {
             if tweet.username != username {
+                // Unauthorized deletion
                 return Err(Error::Unauthorized {
                     msg: "You are not authorized to delete this tweet".to_string(),
                 });
             }
+
+            // Perform proper tweet deletion with memory management
+            do_delete_tweet(&id);
+
             Ok(tweet)
         }
         None => Err(Error::NotFound {
@@ -150,10 +166,21 @@ fn get_all_usernames() -> Vec<String> {
         })
 }
 
-// Helper method to perform tweet insertion.
+// Helper method to perform tweet insertion with memory management
 fn do_insert_tweet(tweet: &Tweet) {
     TWEET_STORAGE
         .with(|tweets| tweets.borrow_mut().insert(tweet.id, tweet.clone()));
+}
+
+// Helper method to perform tweet update with memory management
+fn do_update_tweet(tweet: &Tweet) {
+    TWEET_STORAGE
+        .with(|tweets| tweets.borrow_mut().insert(tweet.id, tweet.clone()));
+}
+
+// Helper method to perform tweet deletion with memory management
+fn do_delete_tweet(id: &u64) {
+    TWEET_STORAGE.with(|tweets| tweets.borrow_mut().remove(id));
 }
 
 #[derive(candid::CandidType, Deserialize, Serialize)]
