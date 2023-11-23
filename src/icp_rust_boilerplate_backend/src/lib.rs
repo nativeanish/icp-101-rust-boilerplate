@@ -73,7 +73,7 @@ impl BoundedStorable for Tweet {
 }
 
 impl BoundedStorable for IsUsed {
-    const MAX_SIZE: u32 = 8; // Rust uses 0 and 1 byte to represent true and false
+    const MAX_SIZE: u32 = 8;
     const IS_FIXED_SIZE: bool = false;
 }
 impl BoundedStorable for UserPrincipal {
