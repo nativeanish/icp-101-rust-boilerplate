@@ -1,7 +1,8 @@
 #[macro_use]
 extern crate serde;
 
-use candid::{Decode, Encode};
+use candid::{Decode, Encode, Principal};
+use ic_cdk::caller;
 use ic_cdk::api::time;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
@@ -9,6 +10,11 @@ use std::{borrow::Cow, cell::RefCell};
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 type IdCell = Cell<u64, Memory>;
+
+#[derive(candid::CandidType, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct UserPrincipal(Principal);
+#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Username(String);
 
 #[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
 struct Tweet {
@@ -29,8 +35,34 @@ impl Storable for Tweet {
         Decode!(bytes.as_ref(), Self).unwrap()
     }
 }
+impl Storable for UserPrincipal {
+    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+}
+impl Storable for Username {
+    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+}
 
 impl BoundedStorable for Tweet {
+    const MAX_SIZE: u32 = 1024;
+    const IS_FIXED_SIZE: bool = false;
+}
+impl BoundedStorable for UserPrincipal {
+    const MAX_SIZE: u32 = 1024;
+    const IS_FIXED_SIZE: bool = false;
+}
+impl BoundedStorable for Username {
     const MAX_SIZE: u32 = 1024;
     const IS_FIXED_SIZE: bool = false;
 }
@@ -48,6 +80,10 @@ thread_local! {
     static TWEET_STORAGE: RefCell<StableBTreeMap<u64, Tweet, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(1)))
+        ));
+    static USERNAME: RefCell<StableBTreeMap<UserPrincipal, Username, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2)))
         ));
 }
 
@@ -68,17 +104,20 @@ fn get_tweet(id: u64) -> Result<Tweet, Error> {
 
 #[ic_cdk::update]
 fn set_username(username: String) -> Option<()> {
+    assert!(username.len() > 0, "Username can't be empty");
+    assert!(!USERNAME
+        .with(|usernames| usernames.borrow().contains_key(&UserPrincipal(caller()))), "Username already set.");
     // Set the username for the current user
-    USERNAME.with(|u| u.replace(username));
+    USERNAME
+        .with(|usernames| usernames.borrow_mut().insert(UserPrincipal(caller()), Username(username.clone())));
     Some(())
 }
 
 #[ic_cdk::update]
 fn create_tweet(payload: TweetPayload) -> Option<Tweet> {
     // Validate payload content to prevent potential vulnerabilities
-    if payload.content.is_empty() {
-        return None;
-    }
+    assert!(payload.content.len() > 0, "Content can't be empty");
+    let username = USERNAME.with(|u| u.borrow().get(&UserPrincipal(caller()))).expect("Only registered users can tweet");
 
     let id = ID_COUNTER
         .with(|counter| {
@@ -88,11 +127,9 @@ fn create_tweet(payload: TweetPayload) -> Option<Tweet> {
         })
         .expect("Cannot increment id counter");
 
-    let username = USERNAME.with(|u| u.borrow().clone());
-
     let tweet = Tweet {
         id,
-        username: username.clone(),
+        username: username.0,
         content: payload.content,
         created_at: time(),
         likes: 0,
@@ -107,11 +144,11 @@ fn create_tweet(payload: TweetPayload) -> Option<Tweet> {
 
 #[ic_cdk::update]
 fn update_tweet(id: u64, payload: TweetPayload) -> Result<Tweet, Error> {
-    let username = USERNAME.with(|u| u.borrow().clone());
+    let username = USERNAME.with(|u| u.borrow().get(&UserPrincipal(caller()))).expect("User isn't registered");
 
     match TWEET_STORAGE.with(|tweets| tweets.borrow().get(&id)) {
         Some(mut tweet) => {
-            if tweet.username != username {
+            if tweet.username != username.0 {
                 return Err(Error::Unauthorized {
                     msg: "You are not authorized to update this tweet".to_string(),
                 });
@@ -132,11 +169,11 @@ fn update_tweet(id: u64, payload: TweetPayload) -> Result<Tweet, Error> {
 
 #[ic_cdk::update]
 fn delete_tweet(id: u64) -> Result<Tweet, Error> {
-    let username = USERNAME.with(|u| u.borrow().clone());
+    let username = USERNAME.with(|u| u.borrow().get(&UserPrincipal(caller()))).expect("User isn't registered");
 
     match TWEET_STORAGE.with(|tweets| tweets.borrow_mut().remove(&id)) {
-        Some(mut tweet) => {
-            if tweet.username != username {
+        Some(tweet) => {
+            if tweet.username != username.0 {
                 // Unauthorized deletion
                 return Err(Error::Unauthorized {
                     msg: "You are not authorized to delete this tweet".to_string(),
@@ -156,12 +193,12 @@ fn delete_tweet(id: u64) -> Result<Tweet, Error> {
 
 #[ic_cdk::query]
 fn get_all_usernames() -> Vec<String> {
-    TWEET_STORAGE
-        .with(|tweets| {
-            tweets
+    USERNAME
+        .with(|usernames| {
+            usernames
                 .borrow()
                 .iter()
-                .map(|(_, tweet)| tweet.username.clone())
+                .map(|(_, tweet)| tweet.0.clone())
                 .collect::<Vec<String>>()
         })
 }
@@ -189,9 +226,6 @@ enum Error {
     Unauthorized { msg: String },
 }
 
-thread_local! {
-    static USERNAME: RefCell<String> = RefCell::new(String::new());
-}
 
 // A helper method to get a tweet by id. Used in get_tweet/update_tweet.
 fn _get_tweet(id: &u64) -> Option<Tweet> {
