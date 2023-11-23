@@ -13,6 +13,10 @@ type IdCell = Cell<u64, Memory>;
 
 #[derive(candid::CandidType, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct UserPrincipal(Principal);
+
+#[derive(candid::CandidType, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct IsUsed(bool);
+
 #[derive(candid::CandidType, Clone, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Username(String);
 
@@ -53,17 +57,31 @@ impl Storable for Username {
         Decode!(bytes.as_ref(), Self).unwrap()
     }
 }
+impl Storable for IsUsed {
+    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+}
 
 impl BoundedStorable for Tweet {
     const MAX_SIZE: u32 = 1024;
     const IS_FIXED_SIZE: bool = false;
 }
+
+impl BoundedStorable for IsUsed {
+    const MAX_SIZE: u32 = 8; // Rust uses 0 and 1 byte to represent true and false
+    const IS_FIXED_SIZE: bool = false;
+}
 impl BoundedStorable for UserPrincipal {
-    const MAX_SIZE: u32 = 1024;
+    const MAX_SIZE: u32 = 63; // max length of principals is 63 characters
     const IS_FIXED_SIZE: bool = false;
 }
 impl BoundedStorable for Username {
-    const MAX_SIZE: u32 = 1024;
+    const MAX_SIZE: u32 = 64;
     const IS_FIXED_SIZE: bool = false;
 }
 
@@ -85,6 +103,10 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2)))
         ));
+        static USED_USERNAME: RefCell<StableBTreeMap<Username, IsUsed, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3)))
+        ));
 }
 
 #[derive(candid::CandidType, Serialize, Deserialize, Default)]
@@ -105,8 +127,11 @@ fn get_tweet(id: u64) -> Result<Tweet, Error> {
 #[ic_cdk::update]
 fn set_username(username: String) -> Option<()> {
     assert!(username.len() > 0, "Username can't be empty");
-    assert!(!USERNAME
-        .with(|usernames| usernames.borrow().contains_key(&UserPrincipal(caller()))), "Username already set.");
+    assert!(!USED_USERNAME
+        .with(|used_usernames| used_usernames.borrow().contains_key(&Username(username.clone()))), "Username already in use.");
+    assert!(!USERNAME.with(|usernames| usernames.borrow().contains_key(&UserPrincipal(caller()))), "Username already set.");
+    USED_USERNAME
+        .with(|used_usernames| used_usernames.borrow_mut().insert(Username(username.clone()), IsUsed(true)));
     // Set the username for the current user
     USERNAME
         .with(|usernames| usernames.borrow_mut().insert(UserPrincipal(caller()), Username(username.clone())));
@@ -193,6 +218,7 @@ fn delete_tweet(id: u64) -> Result<Tweet, Error> {
 
 #[ic_cdk::query]
 fn get_all_usernames() -> Vec<String> {
+    assert!(!USERNAME.with(|usernames| usernames.borrow().is_empty()), "There are currently no registered users.");
     USERNAME
         .with(|usernames| {
             usernames
