@@ -1,107 +1,30 @@
 #[macro_use]
 extern crate serde;
 
-use candid::{Decode, Encode, Principal};
-use ic_cdk::caller;
+use candid::{Decode, Encode};
 use ic_cdk::api::time;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
-use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
+use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, Storable};
 use std::{borrow::Cow, cell::RefCell};
-
+use std::collections::BTreeMap;
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 type IdCell = Cell<u64, Memory>;
-
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-struct UserPrincipal(Principal);
-
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-struct IsUsed(bool);
-
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct Username(String);
 
 #[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
 struct Tweet {
     id: u64,
-    username: String,
+    user_id: u64,
     content: String,
     created_at: u64,
-    likes: u64,
-    retweets: u64,
-    comments: Vec<Comment>,
-}
-
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
-struct Comment {
-    username: String,
-    content: String,
-    created_at: u64,
-}
-
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
-struct UserProfile {
-    username: Username,
-    password: String, 
-    profile_picture_url: Option<String>,
-    bio: Option<String>,
+    updated_at: Option<u64>,
 }
 
 impl Storable for Tweet {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
+    fn to_bytes(&self) -> Cow<[u8]> {
         Cow::Owned(Encode!(self).unwrap())
     }
 
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
-    }
-}
-
-impl Storable for Comment {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
-    }
-}
-
-impl Storable for UserPrincipal {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
-    }
-}
-
-impl Storable for Username {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
-    }
-}
-
-impl Storable for IsUsed {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
-    }
-}
-
-impl Storable for UserProfile {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
         Decode!(bytes.as_ref(), Self).unwrap()
     }
 }
@@ -111,28 +34,25 @@ impl BoundedStorable for Tweet {
     const IS_FIXED_SIZE: bool = false;
 }
 
-impl BoundedStorable for Comment {
-    const MAX_SIZE: u32 = 512;
-    const IS_FIXED_SIZE: bool = false;
+#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
+struct User {
+    id: u64,
+    username: String,
+    bio: String,
 }
 
-impl BoundedStorable for IsUsed {
-    const MAX_SIZE: u32 = 8;
-    const IS_FIXED_SIZE: bool = false;
+impl Storable for User {
+    fn to_bytes(&self) -> Cow<[u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
 }
 
-impl BoundedStorable for UserPrincipal {
-    const MAX_SIZE: u32 = 63; 
-    const IS_FIXED_SIZE: bool = false;
-}
-
-impl BoundedStorable for Username {
-    const MAX_SIZE: u32 = 64;
-    const IS_FIXED_SIZE: bool = false;
-}
-
-impl BoundedStorable for UserProfile {
-    const MAX_SIZE: u32 = 256; 
+impl BoundedStorable for User {
+    const MAX_SIZE: u32 = 1024;
     const IS_FIXED_SIZE: bool = false;
 }
 
@@ -141,201 +61,212 @@ thread_local! {
         MemoryManager::init(DefaultMemoryImpl::default())
     );
 
-    static ID_COUNTER: RefCell<IdCell> = RefCell::new(
+    static TWEET_ID_COUNTER: RefCell<IdCell> = RefCell::new(
         IdCell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(0))), 0)
-            .expect("Cannot create a counter")
+            .expect("Cannot create a tweet counter")
     );
 
-    static TWEET_STORAGE: RefCell<StableBTreeMap<u64, Tweet, Memory>> =
-        RefCell::new(StableBTreeMap::init(
-            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(1)))
-        ));
+    static USER_ID_COUNTER: RefCell<IdCell> = RefCell::new(
+        IdCell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(1))), 0)
+            .expect("Cannot create a user counter")
+    );
 
-    static USERNAME: RefCell<StableBTreeMap<UserPrincipal, Username, Memory>> =
-        RefCell::new(StableBTreeMap::init(
-            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2)))
-        ));
+    static TWEET_STORAGE: RefCell<BTreeMap<u64, Tweet>> =
+    RefCell::new(BTreeMap::new());
 
-    static USED_USERNAME: RefCell<StableBTreeMap<Username, IsUsed, Memory>> =
-        RefCell::new(StableBTreeMap::init(
-            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3)))
-        ));
 
-    static USER_PROFILES: RefCell<StableBTreeMap<UserPrincipal, UserProfile, Memory>> =
-        RefCell::new(StableBTreeMap::init(
-            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(4)))
-        ));
+        static USER_STORAGE: RefCell<BTreeMap<u64, User>> = RefCell::new(BTreeMap::new());
 }
 
 #[derive(candid::CandidType, Serialize, Deserialize, Default)]
 struct TweetPayload {
+    user_id: u64,
     content: String,
 }
 
+#[derive(candid::CandidType, Serialize, Deserialize, Default)]
+struct UserPayload {
+    username: String,
+    bio: String,
+}
+
 #[ic_cdk::query]
-fn get_tweet(id: u64) -> Result<Tweet, Error> {
-    match _get_tweet(&id) {
-        Some(tweet) => Ok(tweet),
-        None => Err(Error::NotFound {
-            msg: format!("Tweet with id={} not found", id),
-        }),
+fn get_tweet(tweet_id: u64) -> Result<Tweet, Error> {
+    let result = TWEET_STORAGE.with(|storage| {
+        let borrow = storage.borrow();
+        if let Some(tweet) = borrow.get(&tweet_id).cloned() {
+            Ok(tweet)
+        } else {
+            Err(Error::NotFound {
+                msg: format!("Tweet with id={} not found", tweet_id),
+            })
+        }
+    });
+
+    match result {
+        Ok(tweet) => Ok(tweet),
+        Err(err) => Err(err),
     }
 }
 
 #[ic_cdk::update]
-fn set_username(username: String) -> Option<()> {
-    assert!(username.len() > 0, "Username can't be empty");
-    assert!(!USED_USERNAME
-        .with(|used_usernames| used_usernames.borrow().contains_key(&Username(username.clone()))), "Username already in use.");
-    assert!(!USERNAME.with(|usernames| usernames.borrow().contains_key(&UserPrincipal(caller()))), "Username already set.");
-    USED_USERNAME
-        .with(|used_usernames| used_usernames.borrow_mut().insert(Username(username.clone()), IsUsed(true)));
-    USERNAME
-        .with(|usernames| usernames.borrow_mut().insert(UserPrincipal(caller()), Username(username.clone())));
-    Some(())
+fn delete_tweet(tweet_id: u64) -> Result<(), Error> {
+    let result = TWEET_STORAGE.with(|storage| {
+        let mut borrow = storage.borrow_mut();
+        if borrow.contains_key(&tweet_id) {
+            borrow.remove(&tweet_id);
+            Ok(())
+        } else {
+            Err(Error::NotFound {
+                msg: format!("Tweet with id={} not found", tweet_id),
+            })
+        }
+    });
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err),
+    }
 }
+
 
 #[ic_cdk::update]
 fn create_tweet(payload: TweetPayload) -> Option<Tweet> {
-    assert!(payload.content.len() > 0, "Content can't be empty");
-    let username = USERNAME.with(|u| u.borrow().get(&UserPrincipal(caller()))).expect("Only registered users can tweet");
-
-    let id = ID_COUNTER
+    let tweet_id = TWEET_ID_COUNTER
         .with(|counter| {
             let current_value = *counter.borrow().get();
             counter.borrow_mut().set(current_value + 1)
         })
-        .expect("Cannot increment id counter");
+        .expect("Cannot increment tweet id counter");
 
     let tweet = Tweet {
-        id,
-        username: username.0.clone(),
+        id: tweet_id,
+        user_id: payload.user_id,
         content: payload.content,
         created_at: time(),
-        likes: 0,
-        retweets: 0,
-        comments: Vec::new(),
+        updated_at: None,
     };
 
-    do_insert_tweet(&tweet);
-
+    TWEET_STORAGE.with(|storage| storage.borrow_mut().insert(tweet_id, tweet.clone()));
     Some(tweet)
 }
 
 #[ic_cdk::update]
-fn update_tweet(id: u64, payload: TweetPayload) -> Result<Tweet, Error> {
-    let username = USERNAME.with(|u| u.borrow().get(&UserPrincipal(caller()))).expect("User isn't registered");
-
-    match TWEET_STORAGE.with(|tweets| tweets.borrow().get(&id)) {
-        Some(mut tweet) => {
-            if tweet.username != username.0 {
-                return Err(Error::Unauthorized {
-                    msg: "You are not authorized to update this tweet".to_string(),
-                });
-            }
-
+fn update_tweet(tweet_id: u64, payload: TweetPayload) -> Result<Tweet, Error> {
+    let result = TWEET_STORAGE.with(|storage| {
+        let mut borrow = storage.borrow_mut();
+        if let Some(mut tweet) = borrow.get_mut(&tweet_id).cloned() {
+            tweet.user_id = payload.user_id;
             tweet.content = payload.content;
-
-            do_update_tweet(&tweet);
+            tweet.updated_at = Some(time());
 
             Ok(tweet)
+        } else {
+            Err(Error::NotFound {
+                msg: format!("Tweet with id={} not found", tweet_id),
+            })
         }
-        None => Err(Error::NotFound {
-            msg: format!("Tweet with id={} not found", id),
-        }),
+    });
+
+    match result {
+        Ok(updated_tweet) => {
+            TWEET_STORAGE.with(|storage| {
+                storage.borrow_mut().insert(tweet_id, updated_tweet.clone());
+            });
+            Ok(updated_tweet)
+        }
+        Err(err) => Err(err),
     }
 }
 
+fn _get_tweet(tweet_id: &u64) -> Option<Tweet> {
+    TWEET_STORAGE.with(|storage| storage.borrow().get(tweet_id).cloned())
+}
+
+
 #[ic_cdk::update]
-fn delete_tweet(id: u64) -> Result<Tweet, Error> {
-    let username = USERNAME.with(|u| u.borrow().get(&UserPrincipal(caller()))).expect("User isn't registered");
+fn create_user(payload: UserPayload) -> Option<User> {
+    let user_id = USER_ID_COUNTER
+        .with(|counter| {
+            let current_value = *counter.borrow().get();
+            counter.borrow_mut().set(current_value + 1)
+        })
+        .expect("Cannot increment user id counter");
 
-    match TWEET_STORAGE.with(|tweets| tweets.borrow_mut().remove(&id)) {
-        Some(tweet) => {
-            if tweet.username != username.0 {
-                return Err(Error::Unauthorized {
-                    msg: "You are not authorized to delete this tweet".to_string(),
-                });
+    let user = User {
+        id: user_id,
+        username: payload.username,
+        bio: payload.bio,
+    };
+
+    USER_STORAGE.with(|storage| storage.borrow_mut().insert(user_id, user.clone()));
+    Some(user)
+}
+
+#[ic_cdk::update]
+fn edit_user(user_id: u64, payload: UserPayload) -> Result<User, Error> {
+    match USER_STORAGE.with(|storage| {
+        let mut borrow = storage.borrow_mut();
+        match borrow.get_mut(&user_id) {
+            Some(user) => {
+                user.username = payload.username;
+                user.bio = payload.bio;
+                Ok(user.clone())
             }
-
-            do_delete_tweet(&id);
-
-            Ok(tweet)
+            None => Err(Error::NotFound {
+                msg: format!("User with id={} not found", user_id),
+            }),
         }
-        None => Err(Error::NotFound {
-            msg: format!("Tweet with id={} not found", id),
-        }),
+    }) {
+        Ok(result) => Ok(result),
+        Err(err) => Err(err),
+    }
+}
+
+
+#[ic_cdk::query]
+fn get_user(user_id: u64) -> Result<User, Error> {
+    match USER_STORAGE.with(|storage| {
+        let borrow = storage.borrow();
+        if let Some(user) = borrow.get(&user_id).cloned() {
+            Ok(user)
+        } else {
+            Err(Error::NotFound {
+                msg: format!("User with id={} not found", user_id),
+            })
+        }
+    }) {
+        Ok(result) => Ok(result),
+        Err(err) => Err(err),
     }
 }
 
 #[ic_cdk::query]
-fn get_all_usernames() -> Vec<String> {
-    assert!(!USERNAME.with(|usernames| usernames.borrow().is_empty()), "There are currently no registered users.");
-    USERNAME
-        .with(|usernames| {
-            usernames
-                .borrow()
-                .iter()
-                .map(|(_, tweet)| tweet.0.clone())
-                .collect::<Vec<String>>()
-        })
+fn get_all_users() -> Vec<User> {
+    USER_STORAGE.with(|storage| storage.borrow().values().cloned().collect())
 }
 
-fn do_insert_tweet(tweet: &Tweet) {
-    TWEET_STORAGE
-        .with(|tweets| tweets.borrow_mut().insert(tweet.id, tweet.clone()));
-}
-
-fn do_update_tweet(tweet: &Tweet) {
-    TWEET_STORAGE
-        .with(|tweets| tweets.borrow_mut().insert(tweet.id, tweet.clone()));
-}
-
-fn do_delete_tweet(id: &u64) {
-    TWEET_STORAGE.with(|tweets| tweets.borrow_mut().remove(id));
+#[ic_cdk::update]
+fn delete_user(user_id: u64) -> Result<(), Error> {
+    match USER_STORAGE.with(|storage| {
+        let mut borrow = storage.borrow_mut();
+        if borrow.contains_key(&user_id) {
+            borrow.remove(&user_id);
+            Ok(())
+        } else {
+            Err(Error::NotFound {
+                msg: format!("User with id={} not found", user_id),
+            })
+        }
+    }) {
+        Ok(result) => Ok(result),
+        Err(err) => Err(err),
+    }
 }
 
 #[derive(candid::CandidType, Deserialize, Serialize)]
 enum Error {
     NotFound { msg: String },
-    Unauthorized { msg: String },
-}
-
-fn _get_tweet(id: &u64) -> Option<Tweet> {
-    TWEET_STORAGE.with(|tweets| tweets.borrow().get(id).map(|tweet| tweet.clone()))
-}
-#[ic_cdk::update]
-fn update_profile(profile: UserProfile) -> Option<()> {
-    let caller_principal = UserPrincipal(caller());
-    assert!(USERNAME
-        .with(|usernames| usernames.borrow().get(&caller_principal))
-        .is_some(), "User not registered.");
-
-    USER_PROFILES.with(|profiles| {
-        profiles.borrow_mut().insert(caller_principal.clone(), profile.clone())
-    });
-
-    Some(())
-}
-
-#[ic_cdk::query]
-fn get_profile(username: String) -> Option<UserProfile> {
-    let principal_result = Principal::from_text(username.clone());
-    let principal = match principal_result {
-        Ok(principal) => principal,
-        Err(err) => {
-            println!("Error creating principal: {:?}", err);
-            return None;
-        }
-    };
-    let principal = UserPrincipal(principal);
-        assert!(USERNAME
-        .with(|usernames| usernames.borrow().get(&principal))
-        .is_some(), "User not found.");
-
-    USER_PROFILES
-    .with(|profiles| profiles.borrow().get(&principal))
-    .map(|profile| profile.clone())
 }
 
 ic_cdk::export_candid!();
